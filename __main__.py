@@ -1,52 +1,105 @@
+import asyncio
 import requests
-import time
+import json  # Importe o módulo JSON
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from bs4 import BeautifulSoup
 
-CAPSOLVER_API_KEY = "CAP-F5238D35CBD407280A722AEC24E62FB22B065F6412A88E3A1E4A254AD7049B36"
-
-PAGE_URL = "https://pt.namemc.com/minecraft-names?offset=3196800&sort=desc"
-WEBSITE_KEY = "0x4AAAAAAADnOjc0PNeA8qVm"
-
-
-def capsolver():
-    payload = {
-        "clientKey": CAPSOLVER_API_KEY,
-        "task": {
-            "type": 'AntiTurnstileTaskProxyLess',
-            "websiteKey": WEBSITE_KEY,
-            "websiteURL": PAGE_URL,
-            "metadata": {
-                "action": ""
-            }
-        }
-    }
-    res = requests.post("https://api.capsolver.com/createTask", json=payload)
-    resp = res.json()
-    task_id = resp.get("taskId")
-    if not task_id:
-        print("Falha ao criar a tarefa:", res.text)
-        return
-    print(f"Tarefa criada com sucesso. ID da Tarefa: {task_id} / Aguardando resultado...")
-
-    while True:
-        time.sleep(1)  # atraso
-        payload = {"clientKey": CAPSOLVER_API_KEY, "taskId": task_id}
-        res = requests.post("https://api.capsolver.com/getTaskResult", json=payload)
-        resp = res.json()
-        status = resp.get("status")
-        if status == "ready":
-            return resp.get("solution", {}).get('token')
-        if status == "failed" or resp.get("errorId"):
-            print("Falha na resolução! Resposta:", res.text)
-            return
+START_URL = "https://pt.namemc.com/minecraft-names?offset=3196800&sort=desc"
+NEXT_PAGE_URL = "https://pt.namemc.com/minecraft-names?sort=desc&offset=25"
+USER_DATA_DIR = "./my_browser_session"
 
 
-def main():
-    """
-    Função principal que orquestra a criação e obtenção da solução.
-    """
-    token = capsolver()
-    print(token)
+async def get_verified_session(url: str) -> dict | None:
+
+    print("🚀 Lançando o navegador com configurações stealth manuais...")
+    try:
+        async with async_playwright() as p:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=USER_DATA_DIR,
+                headless=False,
+                args=["--start-maximized"],
+                no_viewport=True,
+            )
+            page = await context.new_page()
+            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            print("Navegando para o site...")
+            await page.goto(url, timeout=120000)
+            print("⏳ Aguardando Cloudflare ou o conteúdo...")
+            try:
+                await page.wait_for_selector('//a[starts-with(@href, "/profile/")]', timeout=5000)
+                print("✅ Conteúdo já presente. Nenhum desafio foi necessário.")
+            except PlaywrightTimeoutError:
+                print("Desafio detectado. Aguardando a resolução...")
+                await page.wait_for_selector('//a[starts-with(@href, "/profile/")]', timeout=120000)
+                print("✅ Desafio do Cloudflare resolvido!")
+            cookies = await context.cookies()
+            user_agent = await page.evaluate("() => navigator.userAgent")
+            await context.close()
+            return {"cookies": cookies, "user_agent": user_agent}
+    except PlaywrightTimeoutError:
+        print("❌ O tempo limite foi atingido. A proteção do site pode ser muito forte ou o IP está sinalizado.")
+        return None
+    except Exception as e:
+        print(f"Um erro inesperado ocorreu: {e}")
+        return None
+
+
+# --- ATENÇÃO ÀS MUDANÇAS AQUI ---
+def scrape_and_get_data(session_data: dict, url: str) -> list | None:
+
+    if not session_data:
+        print("Não é possível extrair dados, a sessão é inválida.")
+        return None
+
+    print(f"\n⚙️  Preparando para extrair dados de {url} com a sessão verificada...")
+    s = requests.Session()
+    for cookie in session_data['cookies']:
+        s.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
+    s.headers.update({"User-Agent": session_data['user_agent']})
+
+    try:
+        response = s.get(url)
+        response.raise_for_status()
+        print(f"✔️ Página buscada com sucesso, status: {response.status_code}")
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        scraped_data = []
+
+        table_rows = soup.select('div.card-body > table > tbody > tr')
+
+        for row in table_rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                name = cols[0].text.strip()
+                drop_time = cols[1].text.strip()
+
+                scraped_data.append({
+                    "name": name,
+                    "drop_time": drop_time
+                })
+
+        return scraped_data
+
+    except requests.RequestException as e:
+        print(f"❌ Falha ao extrair dados com a sessão: {e}")
+        return None
+
+
+async def main():
+
+    session_data = await get_verified_session(START_URL)
+    if session_data:
+        scraped_data = scrape_and_get_data(session_data, START_URL)
+
+        if scraped_data:
+            output_filename = 'minecraft_names.json'
+
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                json.dump(scraped_data, f, ensure_ascii=False, indent=4)
+
+            print(f"\n✨ Operação concluída! Foram salvos {len(scraped_data)} nomes no arquivo '{output_filename}'.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
