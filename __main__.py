@@ -1,6 +1,6 @@
 import asyncio
 import requests
-import json  # Importe o módulo JSON
+import json
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
 
@@ -44,7 +44,6 @@ async def get_verified_session(url: str) -> dict | None:
         return None
 
 
-# --- ATENÇÃO ÀS MUDANÇAS AQUI ---
 def scrape_and_get_data(session_data: dict, url: str) -> list | None:
 
     if not session_data:
